@@ -1,0 +1,35 @@
+{
+  "region": "eu-central-1",
+  "topics": [
+    {
+      "arn": "arn:aws:sns:eu-central-1:123456789012:prod-alerts",
+      "attributes": {
+        "TopicArn": "arn:aws:sns:eu-central-1:123456789012:prod-alerts",
+        "DisplayName": "prod-alerts",
+        "Owner": "123456789012",
+        "SubscriptionsConfirmed": "1",
+        "SubscriptionsPending": "0",
+        "Policy": "{\"Version\": \"2008-10-17\", \"Id\": \"__default_policy_ID\", \"Statement\": [{\"Sid\": \"__default_statement_ID\", \"Effect\": \"Allow\", \"Principal\": {\"AWS\": \"*\"}, \"Action\": [\"SNS:Publish\", \"SNS:Subscribe\", \"SNS:GetTopicAttributes\"], \"Resource\": \"arn:aws:sns:eu-central-1:123456789012:placeholder\", \"Condition\": {\"StringEquals\": {\"AWS:SourceOwner\": \"123456789012\"}}}]}",
+        "EffectiveDeliveryPolicy": "{\"http\": {\"defaultHealthyRetryPolicy\": {\"numRetries\": 3, \"minDelayTarget\": 20, \"maxDelayTarget\": 20}}}",
+        "KmsMasterKeyId": "alias/aws/sns"
+      },
+      "subscriptions": [
+        {
+          "SubscriptionArn": "arn:aws:sns:eu-central-1:123456789012:prod-alerts:00000001-1111-2222-3333-444444444444",
+          "Owner": "123456789012",
+          "Protocol": "https",
+          "Endpoint": "https://alerts.example.com/sns",
+          "TopicArn": "arn:aws:sns:eu-central-1:123456789012:prod-alerts"
+        }
+      ],
+      "subscription_attributes": {
+        "arn:aws:sns:eu-central-1:123456789012:prod-alerts:00000001-1111-2222-3333-444444444444": {
+          "Protocol": "https",
+          "Endpoint": "https://alerts.example.com/sns",
+          "ConfirmationWasAuthenticated": "true",
+          "RedrivePolicy": "{\"deadLetterTargetArn\": \"arn:aws:sqs:eu-central-1:123456789012:sns-dlq\"}"
+        }
+      }
+    }
+  ]
+}

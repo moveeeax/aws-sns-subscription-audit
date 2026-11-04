@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest
+
+      - name: CLI smoke
+        run: |
+          aws-sns-subscription-audit --version
+          aws-sns-subscription-audit --help > /dev/null
+
+      - name: Fixture replay
+        run: |
+          set +e
+          python examples/demo.py healthy
+          test $? -eq 0 || { echo "healthy fixture should exit 0"; exit 1; }
+          python examples/demo.py messy
+          test $? -eq 1 || { echo "messy fixture should exit 1"; exit 1; }
+          python examples/demo.py messy --fail-on never
+          test $? -eq 0 || { echo "--fail-on never should exit 0"; exit 1; }
+
+      - name: Fixtures are up to date
+        run: |
+          python examples/make_fixtures.py
+          git diff --exit-code examples/fixtures

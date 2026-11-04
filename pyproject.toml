@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aws-sns-subscription-audit"
+version = "0.1.0"
+description = "Audit SNS topics and subscriptions for alerting paths that cannot deliver"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Michael Tarassov", email = "michael@tarassov.me" }]
+keywords = ["aws", "sns", "alerting", "sre", "audit", "cli"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Systems Administration",
+]
+dependencies = ["boto3>=1.28"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.urls]
+Homepage = "https://github.com/moveeeax/aws-sns-subscription-audit"
+Issues = "https://github.com/moveeeax/aws-sns-subscription-audit/issues"
+
+[project.scripts]
+aws-sns-subscription-audit = "aws_sns_subscription_audit.cli:main"
+
+[tool.setuptools]
+packages = ["aws_sns_subscription_audit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
