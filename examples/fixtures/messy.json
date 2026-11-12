@@ -14,7 +14,19 @@
         "KmsMasterKeyId": "alias/aws/sns"
       },
       "subscriptions": [],
-      "subscription_attributes": {}
+      "subscription_attributes": {},
+      "metrics": {
+        "published": [
+          20,
+          20,
+          20,
+          20,
+          20,
+          20,
+          20
+        ],
+        "failed": []
+      }
     },
     {
       "arn": "arn:aws:sns:eu-central-1:123456789012:oncall-email",
@@ -44,7 +56,14 @@
           "TopicArn": "arn:aws:sns:eu-central-1:123456789012:oncall-email"
         }
       ],
-      "subscription_attributes": {}
+      "subscription_attributes": {},
+      "metrics": {
+        "published": [
+          2,
+          3
+        ],
+        "failed": []
+      }
     },
     {
       "arn": "arn:aws:sns:eu-central-1:123456789012:legacy-webhook",
@@ -72,6 +91,10 @@
           "Endpoint": "http://hooks.internal.example/sns",
           "ConfirmationWasAuthenticated": "false"
         }
+      },
+      "metrics": {
+        "published": [],
+        "failed": []
       }
     },
     {
@@ -100,6 +123,26 @@
           "Protocol": "sqs",
           "Endpoint": "arn:aws:sqs:eu-central-1:123456789012:jobs"
         }
+      },
+      "metrics": {
+        "published": [
+          150,
+          140,
+          160,
+          155,
+          145,
+          130,
+          120
+        ],
+        "failed": [
+          6,
+          4,
+          9,
+          5,
+          3,
+          7,
+          6
+        ]
       }
     }
   ]

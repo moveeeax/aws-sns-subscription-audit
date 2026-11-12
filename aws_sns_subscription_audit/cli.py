@@ -8,11 +8,34 @@ import sys
 from . import __version__
 from .model import AwsError, severity_rank
 from .report import render, sort_findings
-from .rules import RULE_NAMES, evaluate_all
+from .rules import DEFAULT_MAX_FAILURE_RATIO, RULE_NAMES, evaluate_all
 
 EXIT_CLEAN = 0
 EXIT_FINDINGS = 1
 EXIT_AWS_ERROR = 2
+
+# CloudWatch keeps hourly datapoints for 455 days; the daily period is built from them.
+MAX_METRICS_DAYS = 455
+
+
+def _metrics_days(value: str) -> int:
+    try:
+        days = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number of days: {value}") from None
+    if not 1 <= days <= MAX_METRICS_DAYS:
+        raise argparse.ArgumentTypeError(f"must be between 1 and {MAX_METRICS_DAYS}")
+    return days
+
+
+def _ratio(value: str) -> float:
+    try:
+        ratio = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value}") from None
+    if not ratio >= 0:  # also rejects nan
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return ratio
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="comma separated rules to drop from output and exit code")
     parser.add_argument("--show-endpoints", action="store_true",
                         help="print email and sms endpoints unmasked")
+    parser.add_argument("--metrics-days", type=_metrics_days, default=0, metavar="DAYS",
+                        help="read CloudWatch delivery metrics for the last DAYS days "
+                             "(enables TOPIC_DELIVERY_FAILURES and TOPIC_UNUSED)")
+    parser.add_argument("--max-failure-ratio", type=_ratio, default=None, metavar="RATIO",
+                        help="failed deliveries per published message above which "
+                             f"TOPIC_DELIVERY_FAILURES fires (default: "
+                             f"{DEFAULT_MAX_FAILURE_RATIO})")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -66,6 +96,11 @@ def run(argv=None, session=None, stdout=None, stderr=None) -> int:
         if rule not in RULE_NAMES:
             print(f"error: unknown rule in --ignore: {rule}", file=err)
             return EXIT_AWS_ERROR
+    if args.max_failure_ratio is not None and not args.metrics_days:
+        print("error: --max-failure-ratio needs --metrics-days", file=err)
+        return EXIT_AWS_ERROR
+    max_failure_ratio = (DEFAULT_MAX_FAILURE_RATIO if args.max_failure_ratio is None
+                         else args.max_failure_ratio)
 
     try:
         if session is None:
@@ -77,7 +112,7 @@ def run(argv=None, session=None, stdout=None, stderr=None) -> int:
 
         from .collect import collect
 
-        topics, errors = collect(session, regions, set(args.topic))
+        topics, errors = collect(session, regions, set(args.topic), args.metrics_days)
     except AwsError as exc:
         print(f"error: {exc}", file=err)
         return EXIT_AWS_ERROR
@@ -85,7 +120,8 @@ def run(argv=None, session=None, stdout=None, stderr=None) -> int:
         print(f"error: {type(exc).__name__}: {exc}", file=err)
         return EXIT_AWS_ERROR
 
-    findings = sort_findings(evaluate_all(topics, args.show_endpoints, unknown))
+    findings = sort_findings(evaluate_all(topics, args.show_endpoints, unknown,
+                                               max_failure_ratio))
     out.write(render(args.format, findings, len(topics), errors))
 
     if args.format != "table":

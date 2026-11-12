@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from aws_sns_subscription_audit.model import Subscription, Topic
+from aws_sns_subscription_audit.model import Subscription, Topic, TopicMetrics
 from aws_sns_subscription_audit.rules import (
     RULE_SEVERITY,
     evaluate,
@@ -190,3 +190,57 @@ def test_counts_in_details_agree_with_the_noun():
 
 def test_every_rule_has_a_severity():
     assert set(RULE_SEVERITY.values()) <= {"high", "medium", "low"}
+
+
+def with_metrics(published, failed, days=7):
+    topic = healthy_topic()
+    topic.metrics = TopicMetrics(days=days, published=published, failed=failed)
+    return topic
+
+
+def test_no_metrics_means_no_metric_findings():
+    """Without --metrics-days there are no numbers, so nothing is claimed either way."""
+    assert healthy_topic().metrics is None
+    assert evaluate(healthy_topic()) == []
+
+
+def test_failure_ratio_above_threshold_is_high():
+    findings = evaluate(with_metrics(published=1000, failed=40))
+    assert [f.rule for f in findings] == ["TOPIC_DELIVERY_FAILURES"]
+    assert findings[0].severity == "high"
+    assert "40 failed deliveries for 1000 published messages in the last 7 days" \
+        in findings[0].detail
+    assert "4.0%, threshold 1.0%" in findings[0].detail
+    assert "FailureFeedbackRoleArn" in findings[0].remediation
+
+
+def test_failure_ratio_at_or_under_threshold_is_silent():
+    assert evaluate(with_metrics(published=1000, failed=10)) == []
+    assert evaluate(with_metrics(published=300, failed=1)) == []
+    assert evaluate(with_metrics(published=50, failed=0)) == []
+
+
+def test_threshold_is_configurable():
+    topic = with_metrics(published=1000, failed=40)
+    assert rules_of(topic, max_failure_ratio=0.05) == []
+    assert rules_of(topic, max_failure_ratio=0) == ["TOPIC_DELIVERY_FAILURES"]
+    assert evaluate_all([topic], max_failure_ratio=0.05) == []
+
+
+def test_failures_with_nothing_published_still_fire_and_are_not_unused():
+    findings = evaluate(with_metrics(published=0, failed=3))
+    assert [f.rule for f in findings] == ["TOPIC_DELIVERY_FAILURES"]
+    assert "no message published in the same window" in findings[0].detail
+
+
+def test_nothing_published_is_low_unused():
+    findings = evaluate(with_metrics(published=0, failed=0, days=1))
+    assert [f.rule for f in findings] == ["TOPIC_UNUSED"]
+    assert findings[0].severity == "low"
+    assert findings[0].detail == "no message published in the last 1 day"
+    assert "aws sns delete-topic" in findings[0].remediation
+
+
+def test_ignore_drops_the_metric_rules():
+    topics = [with_metrics(published=0, failed=0), with_metrics(published=10, failed=5)]
+    assert evaluate_all(topics, ignore=["TOPIC_UNUSED", "TOPIC_DELIVERY_FAILURES"]) == []
