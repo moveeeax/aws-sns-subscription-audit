@@ -30,11 +30,23 @@ class Subscription:
 
 
 @dataclass
+class TopicMetrics:
+    """CloudWatch sums for one topic over the --metrics-days window."""
+
+    days: int
+    published: float = 0.0
+    failed: float = 0.0
+
+
+@dataclass
 class Topic:
     arn: str
     region: str
     attributes: dict = field(default_factory=dict)
     subscriptions: list[Subscription] = field(default_factory=list)
+    # None when metrics were not requested or could not be read; the metric rules
+    # only run on topics that actually have numbers.
+    metrics: TopicMetrics | None = None
 
     @property
     def name(self) -> str:

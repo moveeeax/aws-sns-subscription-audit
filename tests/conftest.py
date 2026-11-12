@@ -5,7 +5,7 @@ import pathlib
 
 import boto3
 import pytest
-from botocore.stub import Stubber
+from botocore.stub import ANY, Stubber
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[1] / "examples" / "fixtures"
 
@@ -25,14 +25,52 @@ class FakeSession:
         return self._clients[name]
 
 
-def sns_client(region: str = "eu-central-1"):
+def aws_client(service: str, region: str = "eu-central-1"):
     session = boto3.Session(
         aws_access_key_id="testing",
         aws_secret_access_key="testing",
         aws_session_token="testing",
         region_name=region,
     )
-    return session.client("sns", region_name=region)
+    return session.client(service, region_name=region)
+
+
+def sns_client(region: str = "eu-central-1"):
+    return aws_client("sns", region)
+
+
+def metric_query(query_id: str, metric: str, topic_name: str) -> dict:
+    return {
+        "Id": query_id,
+        "MetricStat": {
+            "Metric": {
+                "Namespace": "AWS/SNS",
+                "MetricName": metric,
+                "Dimensions": [{"Name": "TopicName", "Value": topic_name}],
+            },
+            "Period": 86400,
+            "Stat": "Sum",
+        },
+        "ReturnData": True,
+    }
+
+
+def queue_metrics(stubber: Stubber, data: dict) -> None:
+    """One GetMetricData call: published and failed per topic, in topic order."""
+    queries, results = [], []
+    for index, topic in enumerate(data["topics"]):
+        name = topic["arn"].rsplit(":", 1)[-1]
+        for prefix, metric, key in (("p", "NumberOfMessagesPublished", "published"),
+                                    ("f", "NumberOfNotificationsFailed", "failed")):
+            queries.append(metric_query(f"{prefix}{index}", metric, name))
+            results.append({"Id": f"{prefix}{index}", "Label": metric,
+                            "Values": [float(v) for v in topic["metrics"][key]],
+                            "StatusCode": "Complete"})
+    stubber.add_response(
+        "get_metric_data",
+        {"MetricDataResults": results},
+        {"MetricDataQueries": queries, "StartTime": ANY, "EndTime": ANY},
+    )
 
 
 def queue_fixture(stubber: Stubber, data: dict) -> None:
@@ -68,17 +106,29 @@ def queue_fixture(stubber: Stubber, data: dict) -> None:
 
 @pytest.fixture
 def stubbed():
-    """Factory: (fixture name) -> (session, stubber) with everything queued."""
+    """Factory: (fixture name) -> (session, stubber) with everything queued.
+
+    With metrics=True a cloudwatch client is stubbed too, with the fixture's
+    GetMetricData response queued for --metrics-days.
+    """
     made = []
 
-    def build(name: str):
+    def build(name: str, metrics: bool = False):
         data = load(name)
         client = sns_client(data["region"])
         stubber = Stubber(client)
         queue_fixture(stubber, data)
         stubber.activate()
         made.append(stubber)
-        return FakeSession({"sns": client}, data["region"]), stubber
+        clients = {"sns": client}
+        if metrics:
+            cloudwatch = aws_client("cloudwatch", data["region"])
+            cw_stubber = Stubber(cloudwatch)
+            queue_metrics(cw_stubber, data)
+            cw_stubber.activate()
+            made.append(cw_stubber)
+            clients["cloudwatch"] = cloudwatch
+        return FakeSession(clients, data["region"]), stubber
 
     yield build
     for stubber in made:

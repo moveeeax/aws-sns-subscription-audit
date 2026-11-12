@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from botocore.stub import Stubber
 
-from aws_sns_subscription_audit.collect import collect_region, enabled_regions
-from aws_sns_subscription_audit.model import AwsError
+from aws_sns_subscription_audit.collect import (
+    collect,
+    collect_metrics,
+    collect_region,
+    enabled_regions,
+)
+from aws_sns_subscription_audit.model import AwsError, Topic
 
-from .conftest import FakeSession, load, sns_client
+from .conftest import FakeSession, aws_client, load, metric_query, sns_client
 
 REGION = "eu-central-1"
 
@@ -162,3 +169,122 @@ def test_denied_describe_regions_raises_aws_error():
     with pytest.raises(AwsError):
         enabled_regions(FakeSession({"ec2": ec2}))
     stubber.deactivate()
+
+
+NOW = datetime(2026, 11, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def topics_named(*names):
+    return [Topic(arn=f"arn:aws:sns:{REGION}:123456789012:{n}", region=REGION) for n in names]
+
+
+def queries_for(names):
+    out = []
+    for index, name in enumerate(names):
+        out.append(metric_query(f"p{index}", "NumberOfMessagesPublished", name))
+        out.append(metric_query(f"f{index}", "NumberOfNotificationsFailed", name))
+    return out
+
+
+def test_metrics_are_summed_per_topic_and_missing_data_is_zero(stubbed):
+    session, stubber = stubbed("messy", metrics=True)
+    topics, errors = collect(session, [REGION], metrics_days=7)
+    stubber.assert_no_pending_responses()
+    assert errors == []
+    by_name = {t.name: t.metrics for t in topics}
+    assert by_name["jobs-fanout"].published == 1000
+    assert by_name["jobs-fanout"].failed == 40
+    assert by_name["jobs-fanout"].days == 7
+    assert by_name["legacy-webhook"].published == 0  # no datapoints at all
+    assert by_name["billing-orphan"].failed == 0
+
+
+def test_no_metrics_days_never_touches_cloudwatch(stubbed):
+    session, _ = stubbed("healthy")  # the session has no cloudwatch client to hand out
+    topics, errors = collect(session, [REGION])
+    assert errors == []
+    assert topics[0].metrics is None
+
+
+def test_metric_window_ends_now_and_spans_the_days():
+    cloudwatch = aws_client("cloudwatch")
+    stubber = Stubber(cloudwatch)
+    stubber.add_response("get_metric_data", {"MetricDataResults": []},
+                         {"MetricDataQueries": queries_for(["a"]),
+                          "StartTime": NOW - timedelta(days=14), "EndTime": NOW})
+    stubber.activate()
+    topics = topics_named("a")
+    errors = collect_metrics(FakeSession({"cloudwatch": cloudwatch}), REGION, topics, 14,
+                             now=NOW)
+    stubber.assert_no_pending_responses()
+    stubber.deactivate()
+    assert errors == []
+    assert (topics[0].metrics.published, topics[0].metrics.failed) == (0, 0)
+
+
+def test_metric_values_continuing_on_the_next_page_are_added_up():
+    cloudwatch = aws_client("cloudwatch")
+    stubber = Stubber(cloudwatch)
+    window = {"MetricDataQueries": queries_for(["a"]),
+              "StartTime": NOW - timedelta(days=7), "EndTime": NOW}
+    stubber.add_response("get_metric_data", {
+        "MetricDataResults": [{"Id": "p0", "Values": [10.0, 20.0], "StatusCode": "PartialData"},
+                              {"Id": "f0", "Values": [1.0], "StatusCode": "PartialData"}],
+        "NextToken": "page-2",
+    }, window)
+    stubber.add_response("get_metric_data", {
+        "MetricDataResults": [{"Id": "p0", "Values": [30.0], "StatusCode": "Complete"},
+                              {"Id": "f0", "Values": [2.0], "StatusCode": "Complete"}],
+    }, {**window, "NextToken": "page-2"})
+    stubber.activate()
+    topics = topics_named("a")
+    collect_metrics(FakeSession({"cloudwatch": cloudwatch}), REGION, topics, 7, now=NOW)
+    stubber.assert_no_pending_responses()
+    stubber.deactivate()
+    assert (topics[0].metrics.published, topics[0].metrics.failed) == (60, 3)
+
+
+def test_more_than_250_topics_split_into_calls_of_500_queries():
+    names = [f"t{i}" for i in range(251)]
+    cloudwatch = aws_client("cloudwatch")
+    stubber = Stubber(cloudwatch)
+    window = {"StartTime": NOW - timedelta(days=7), "EndTime": NOW}
+    first = queries_for(names[:250])
+    assert len(first) == 500
+    stubber.add_response("get_metric_data", {"MetricDataResults": []},
+                         {"MetricDataQueries": first, **window})
+    stubber.add_response("get_metric_data",
+                         {"MetricDataResults": [{"Id": "p0", "Values": [5.0]}]},
+                         {"MetricDataQueries": queries_for(names[250:]), **window})
+    stubber.activate()
+    topics = topics_named(*names)
+    collect_metrics(FakeSession({"cloudwatch": cloudwatch}), REGION, topics, 7, now=NOW)
+    stubber.assert_no_pending_responses()
+    stubber.deactivate()
+    assert topics[0].metrics.published == 0
+    assert topics[250].metrics.published == 5  # ids restart per call
+
+
+def test_denied_metrics_are_reported_and_the_audit_keeps_the_topics(stubbed):
+    data = load("healthy")
+    session, _ = stubbed("healthy")
+    cloudwatch = aws_client("cloudwatch")
+    stubber = Stubber(cloudwatch)
+    stubber.add_client_error("get_metric_data", service_error_code="AccessDenied",
+                             service_message="not authorized to perform: "
+                                             "cloudwatch:GetMetricData",
+                             http_status_code=403)
+    stubber.activate()
+    session._clients["cloudwatch"] = cloudwatch
+    topics, errors = collect(session, [REGION], metrics_days=7)
+    stubber.deactivate()
+    assert [t.arn for t in topics] == [data["topics"][0]["arn"]]
+    assert topics[0].metrics is None
+    assert len(errors) == 1
+    assert errors[0].operation == "GetMetricData"
+    assert errors[0].topic == ""
+    assert str(errors[0]).startswith(f"{REGION}: GetMetricData failed: AccessDenied")
+
+
+def test_no_topics_means_no_metrics_call():
+    assert collect_metrics(FakeSession({}), REGION, [], 7) == []

@@ -2,7 +2,9 @@
 """Regenerate the recorded API fixtures under examples/fixtures/.
 
 The shapes match what boto3 returns for ListTopics, GetTopicAttributes,
-ListSubscriptionsByTopic and GetSubscriptionAttributes. Nothing here talks to AWS;
+ListSubscriptionsByTopic and GetSubscriptionAttributes; `metrics` holds the daily
+CloudWatch sums GetMetricData returns for --metrics-days (a day with no activity has
+no datapoint, so the lists can be shorter than the window). Nothing here talks to AWS;
 the files exist so the tests can replay a realistic account offline.
 """
 
@@ -34,12 +36,13 @@ def policy(scoped: bool) -> str:
                        "Statement": [statement]})
 
 
-def topic(name, attributes, subscriptions, sub_attributes=None):
+def topic(name, attributes, subscriptions, sub_attributes=None, published=(), failed=()):
     return {
         "arn": arn(name),
         "attributes": attributes,
         "subscriptions": subscriptions,
         "subscription_attributes": sub_attributes or {},
+        "metrics": {"published": list(published), "failed": list(failed)},
     }
 
 
@@ -84,6 +87,8 @@ HEALTHY = {
                 "RedrivePolicy": json.dumps(
                     {"deadLetterTargetArn": f"arn:aws:sqs:{REGION}:{ACCOUNT}:sns-dlq"}),
             }},
+            published=[40, 52, 38, 61, 45, 30, 34],
+            failed=[1],  # 1 of 300, under the default 1% threshold
         ),
     ],
 }
@@ -96,6 +101,7 @@ MESSY = {
             base_attrs("billing-orphan", KmsMasterKeyId="alias/aws/sns",
                        SubscriptionsConfirmed="0"),
             [],
+            published=[20, 20, 20, 20, 20, 20, 20],
         ),
         topic(
             "oncall-email",
@@ -105,6 +111,7 @@ MESSY = {
                 sub("oncall-email", "email", "alice@example.com", pending=True),
                 sub("oncall-email", "email", "bob@example.com", pending=True),
             ],
+            published=[2, 3],
         ),
         topic(
             "legacy-webhook",
@@ -115,6 +122,7 @@ MESSY = {
                 "Endpoint": "http://hooks.internal.example/sns",
                 "ConfirmationWasAuthenticated": "false",
             }},
+            # nothing published in the window: TOPIC_UNUSED
         ),
         topic(
             "jobs-fanout",
@@ -124,6 +132,8 @@ MESSY = {
                 "Protocol": "sqs",
                 "Endpoint": f"arn:aws:sqs:{REGION}:{ACCOUNT}:jobs",
             }},
+            published=[150, 140, 160, 155, 145, 130, 120],
+            failed=[6, 4, 9, 5, 3, 7, 6],  # 40 of 1000: TOPIC_DELIVERY_FAILURES
         ),
     ],
 }

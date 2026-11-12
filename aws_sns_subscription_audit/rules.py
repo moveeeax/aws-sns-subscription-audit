@@ -10,9 +10,11 @@ RULE_SEVERITY = {
     "TOPIC_NO_SUBSCRIPTIONS": "high",
     "SUBSCRIPTION_PENDING_CONFIRMATION": "high",
     "TOPIC_OPEN_POLICY": "high",
+    "TOPIC_DELIVERY_FAILURES": "high",
     "SUBSCRIPTION_INSECURE_ENDPOINT": "medium",
     "TOPIC_UNENCRYPTED": "medium",
     "SUBSCRIPTION_NO_DLQ": "low",
+    "TOPIC_UNUSED": "low",
 }
 
 RULE_NAMES = tuple(RULE_SEVERITY)
@@ -21,6 +23,8 @@ RULE_NAMES = tuple(RULE_SEVERITY)
 DLQ_PROTOCOLS = ("sqs", "lambda", "http", "https", "firehose")
 
 MASKED_PROTOCOLS = ("email", "email-json", "sms")
+
+DEFAULT_MAX_FAILURE_RATIO = 0.01
 
 
 def mask_endpoint(endpoint: str, protocol: str, show: bool) -> str:
@@ -92,7 +96,12 @@ def _actions(policy_doc: str, sids: list[str]) -> list[str]:
     return sorted(set(found))
 
 
-def evaluate(topic: Topic, show_endpoints: bool = False) -> list[Finding]:
+def _count(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
+def evaluate(topic: Topic, show_endpoints: bool = False,
+             max_failure_ratio: float = DEFAULT_MAX_FAILURE_RATIO) -> list[Finding]:
     """All findings for one topic, in severity-then-rule order of RULE_SEVERITY."""
     out: list[Finding] = []
 
@@ -170,6 +179,29 @@ def evaluate(topic: Topic, show_endpoints: bool = False) -> list[Finding]:
             "--attribute-name KmsMasterKeyId --attribute-value alias/aws/sns",
         )
 
+    metrics = topic.metrics
+    if metrics is not None and metrics.failed > 0:
+        window = _n(metrics.days, "day")
+        if metrics.published:
+            ratio = metrics.failed / metrics.published
+            detail = (f"{_count(metrics.failed)} failed deliveries for "
+                      f"{_count(metrics.published)} published messages in the last {window} "
+                      f"({ratio:.1%}, threshold {max_failure_ratio:.1%})")
+        else:
+            # Failures with nothing published: the publish fell just before the window.
+            ratio = float("inf")
+            detail = (f"{_count(metrics.failed)} failed deliveries in the last {window} "
+                      "with no message published in the same window")
+        if ratio > max_failure_ratio:
+            add(
+                "TOPIC_DELIVERY_FAILURES",
+                detail,
+                "turn on delivery status logging to see which subscription fails and why: "
+                f"aws sns set-topic-attributes --region {topic.region} --topic-arn {topic.arn} "
+                "--attribute-name <HTTP|Lambda|SQS|Firehose|Application>FailureFeedbackRoleArn "
+                "--attribute-value <role-arn>",
+            )
+
     no_dlq = [s for s in confirmed
               if s.protocol in DLQ_PROTOCOLS and not s.attributes.get("RedrivePolicy")]
     if no_dlq:
@@ -184,12 +216,23 @@ def evaluate(topic: Topic, show_endpoints: bool = False) -> list[Finding]:
                      for s in no_dlq],
         )
 
+    if metrics is not None and not metrics.published and not metrics.failed:
+        add(
+            "TOPIC_UNUSED",
+            f"no message published in the last {_n(metrics.days, 'day')}",
+            "an alarm topic can be quiet by design; otherwise check that the publisher still "
+            "targets this topic, or delete it: "
+            f"aws sns delete-topic --region {topic.region} --topic-arn {topic.arn}",
+        )
+
     return out
 
 
-def evaluate_all(topics, show_endpoints: bool = False, ignore=()) -> list[Finding]:
+def evaluate_all(topics, show_endpoints: bool = False, ignore=(),
+                 max_failure_ratio: float = DEFAULT_MAX_FAILURE_RATIO) -> list[Finding]:
     skip = {r.strip().upper() for r in ignore if r.strip()}
     findings: list[Finding] = []
     for topic in topics:
-        findings.extend(f for f in evaluate(topic, show_endpoints) if f.rule not in skip)
+        findings.extend(f for f in evaluate(topic, show_endpoints, max_failure_ratio)
+                        if f.rule not in skip)
     return findings

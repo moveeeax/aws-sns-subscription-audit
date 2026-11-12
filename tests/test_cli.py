@@ -149,3 +149,83 @@ def test_every_format_renders_the_healthy_account(stubbed, fmt):
     code, out, _ = invoke(["--region", "eu-central-1", "--format", fmt], session)
     assert code == 0
     assert out
+
+
+def test_metrics_days_adds_the_cloudwatch_rules(stubbed):
+    session, stubber = stubbed("messy", metrics=True)
+    code, out, err = invoke(["--region", "eu-central-1", "--metrics-days", "7"], session)
+    stubber.assert_no_pending_responses()
+    assert code == 1
+    assert err == ""
+    assert "TOPIC_DELIVERY_FAILURES" in out
+    assert "40 failed deliveries for 1000 published messages in the last 7 days" in out
+    assert "TOPIC_UNUSED" in out
+    assert out.strip().splitlines()[-1] == "9 findings across 4 topics (4 high, 2 medium, 3 low)"
+
+
+def test_max_failure_ratio_raises_the_bar(stubbed):
+    session, _ = stubbed("messy", metrics=True)
+    code, out, _ = invoke(["--region", "eu-central-1", "--metrics-days", "7",
+                           "--max-failure-ratio", "0.05", "--format", "json"], session)
+    rules = {f["rule"] for f in json.loads(out)["findings"]}
+    assert "TOPIC_DELIVERY_FAILURES" not in rules
+    assert "TOPIC_UNUSED" in rules
+    assert code == 1
+
+
+def test_healthy_account_stays_clean_with_metrics(stubbed):
+    """1 failure in 300 publishes is under the default 1%."""
+    session, _ = stubbed("healthy", metrics=True)
+    code, out, _ = invoke(["--region", "eu-central-1", "--metrics-days", "7"], session)
+    assert code == 0
+    assert "no findings across 1 topics" in out
+
+
+def test_without_metrics_days_the_metric_rules_never_appear(stubbed):
+    session, _ = stubbed("messy")
+    _, out, _ = invoke(["--region", "eu-central-1"], session)
+    assert "TOPIC_DELIVERY_FAILURES" not in out
+    assert "TOPIC_UNUSED" not in out
+
+
+def test_max_failure_ratio_without_metrics_days_exits_two(stubbed):
+    session, _ = stubbed("healthy")
+    code, _, err = invoke(["--region", "eu-central-1", "--max-failure-ratio", "0.1"],
+                          session)
+    assert code == 2
+    assert "--max-failure-ratio needs --metrics-days" in err
+
+
+@pytest.mark.parametrize("argv", [
+    ["--metrics-days", "0"],
+    ["--metrics-days", "456"],
+    ["--metrics-days", "seven"],
+    ["--metrics-days", "7", "--max-failure-ratio", "-0.1"],
+    ["--metrics-days", "7", "--max-failure-ratio", "nan"],
+])
+def test_bad_metric_flags_are_rejected(argv):
+    with pytest.raises(SystemExit) as excinfo:
+        run(argv, stdout=io.StringIO(), stderr=io.StringIO())
+    assert excinfo.value.code == 2
+
+
+def test_denied_metrics_warn_and_keep_the_static_findings(stubbed):
+    from botocore.stub import Stubber
+
+    from .conftest import aws_client
+
+    session, _ = stubbed("messy")
+    cloudwatch = aws_client("cloudwatch")
+    stubber = Stubber(cloudwatch)
+    stubber.add_client_error("get_metric_data", service_error_code="AccessDenied",
+                             service_message="denied", http_status_code=403)
+    stubber.activate()
+    session._clients["cloudwatch"] = cloudwatch
+    code, out, err = invoke(["--region", "eu-central-1", "--metrics-days", "7",
+                             "--format", "json"], session)
+    stubber.deactivate()
+    payload = json.loads(out)
+    assert code == 1
+    assert len(payload["findings"]) == 7
+    assert payload["errors"][0]["operation"] == "GetMetricData"
+    assert "warning: eu-central-1: GetMetricData failed: AccessDenied" in err

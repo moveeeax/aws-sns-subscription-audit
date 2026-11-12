@@ -29,6 +29,20 @@
           "ConfirmationWasAuthenticated": "true",
           "RedrivePolicy": "{\"deadLetterTargetArn\": \"arn:aws:sqs:eu-central-1:123456789012:sns-dlq\"}"
         }
+      },
+      "metrics": {
+        "published": [
+          40,
+          52,
+          38,
+          61,
+          45,
+          30,
+          34
+        ],
+        "failed": [
+          1
+        ]
       }
     }
   ]

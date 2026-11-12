@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from botocore.exceptions import BotoCoreError, ClientError
 
-from .model import AwsError, CollectionError, Subscription, Topic
+from .model import AwsError, CollectionError, Subscription, Topic, TopicMetrics
+
+# GetMetricData accepts at most 500 queries per call; each topic needs two.
+METRIC_QUERIES_PER_CALL = 500
+METRIC_PERIOD = 86400  # one datapoint per day, summed over the window
+METRIC_PUBLISHED = "NumberOfMessagesPublished"
+METRIC_FAILED = "NumberOfNotificationsFailed"
+
 
 def _message(err: Exception) -> str:
     if isinstance(err, ClientError):
@@ -91,12 +100,73 @@ def collect_region(session, region: str, topics: set[str] | None = None):
     return collected, errors
 
 
-def collect(session, regions, topics=None):
+def _metric_query(query_id: str, metric: str, topic_name: str) -> dict:
+    return {
+        "Id": query_id,
+        "MetricStat": {
+            "Metric": {
+                "Namespace": "AWS/SNS",
+                "MetricName": metric,
+                "Dimensions": [{"Name": "TopicName", "Value": topic_name}],
+            },
+            "Period": METRIC_PERIOD,
+            "Stat": "Sum",
+        },
+        "ReturnData": True,
+    }
+
+
+def collect_metrics(session, region: str, topics: list[Topic], days: int,
+                    now: datetime | None = None) -> list[CollectionError]:
+    """Attach published/failed sums over the last `days` days to each topic.
+
+    SNS emits no datapoint for a day with no activity, so a metric with no values is
+    a real zero, not missing data. A failed call leaves `metrics` as None on the
+    topics it covered and is reported as a region-level error.
+    """
+    if not topics:
+        return []
+    end = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    start = end - timedelta(days=days)
+    client = session.client("cloudwatch", region_name=region)
+    errors: list[CollectionError] = []
+
+    per_call = METRIC_QUERIES_PER_CALL // 2
+    for offset in range(0, len(topics), per_call):
+        batch = topics[offset:offset + per_call]
+        queries: list[dict] = []
+        for index, topic in enumerate(batch):
+            queries.append(_metric_query(f"p{index}", METRIC_PUBLISHED, topic.name))
+            queries.append(_metric_query(f"f{index}", METRIC_FAILED, topic.name))
+
+        sums: dict[str, float] = {}
+        try:
+            pages = client.get_paginator("get_metric_data").paginate(
+                MetricDataQueries=queries, StartTime=start, EndTime=end)
+            for page in pages:
+                # One query's values can continue on the next page, so sum by Id.
+                for result in page.get("MetricDataResults", []):
+                    sums[result["Id"]] = sums.get(result["Id"], 0.0) + \
+                        sum(result.get("Values", []))
+        except (ClientError, BotoCoreError) as err:
+            errors.append(CollectionError(region, "", "GetMetricData", _message(err)))
+            continue
+
+        for index, topic in enumerate(batch):
+            topic.metrics = TopicMetrics(days=days,
+                                         published=sums.get(f"p{index}", 0.0),
+                                         failed=sums.get(f"f{index}", 0.0))
+    return errors
+
+
+def collect(session, regions, topics=None, metrics_days: int = 0, now=None):
     """Collect across regions. Returns (topics, errors)."""
     all_topics: list[Topic] = []
     all_errors: list[CollectionError] = []
     for region in regions:
         found, errors = collect_region(session, region, topics)
+        if metrics_days:
+            errors.extend(collect_metrics(session, region, found, metrics_days, now))
         all_topics.extend(found)
         all_errors.extend(errors)
     return all_topics, all_errors
